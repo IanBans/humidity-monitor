@@ -34,6 +34,22 @@ the ADC's own temperature rather than as a precision ambient measurement.
 The AHT20 uses I2C address `0x38`. It provides the ambient-temperature and
 relative-humidity values printed as `AHT20` in the serial monitor.
 
+## Telnet JSON API
+
+The ESP32-C6 joins the Wi-Fi network configured in `include/secrets.h` and
+listens for Telnet/TCP connections on port 23. The credentials file is ignored
+by Git; copy `include/secrets.example.h` to `include/secrets.h` when setting up
+another checkout.
+
+Each received character returns one JSON object terminated by a newline:
+
+| Character | Response |
+| --- | --- |
+| `1` to `4` | ADC result for AIN0 to AIN3, respectively |
+| `t` | AHT20 temperature and relative humidity |
+
+For example, `t` returns `{"aht20":{"temperature_c":24.50,"temperature_f":76.10,"humidity_rh":42.3}}`.
+
 Build and upload from this directory with:
 
 ```sh
