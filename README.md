@@ -1,0 +1,42 @@
+# ADS1118 reader for Seeed Studio XIAO ESP32-C6
+
+This PlatformIO project samples `AIN0` of an ADS1118 and prints the raw 16-bit
+ADC count and voltage, the ADS1118's internal temperature reading, and AHT20
+temperature/humidity to the serial monitor at 115200 baud.
+
+## Wiring
+
+| ADS1118 | XIAO ESP32-C6 GPIO |
+| --- | --- |
+| CS | GPIO 18 |
+| DIN / MOSI | GPIO 20 |
+| DOUT / MISO | GPIO 19 |
+| SCLK | GPIO 17 |
+| GND | GND |
+| VDD | 3.3 V |
+
+| AHT20 | XIAO ESP32-C6 GPIO |
+| --- | --- |
+| SDA | GPIO 22 |
+| SCL | GPIO 23 |
+| GND | GND |
+| VCC | 3.3 V |
+
+The signal is read as `AIN0` relative to GND. The default PGA range is
+plus/minus 4.096 V, but with a 3.3 V-powered ADS1118 the input must never exceed
+the device supply rails. Change `readAdc(0)` to channels 1 through 3 to read a
+different input.
+
+The temperature reported by the sketch is the ADS1118 IC's internal sensor,
+not an external probe. Its resolution is 0.03125 C; use it mainly to monitor
+the ADC's own temperature rather than as a precision ambient measurement.
+
+The AHT20 uses I2C address `0x38`. It provides the ambient-temperature and
+relative-humidity values printed as `AHT20` in the serial monitor.
+
+Build and upload from this directory with:
+
+```sh
+pio run --target upload
+pio device monitor
+```
