@@ -39,7 +39,9 @@ relative-humidity values printed as `AHT20` in the serial monitor.
 The ESP32-C6 joins the Wi-Fi network configured in `include/secrets.h` and
 listens for Telnet/TCP connections on port 23. The credentials file is ignored
 by Git; copy `include/secrets.example.h` to `include/secrets.h` when setting up
-another checkout.
+another checkout. Up to two simultaneous Telnet sessions are supported.
+When a USB serial monitor connects, the firmware prints the assigned Wi-Fi IP
+address and the ESP32-C6 Wi-Fi MAC address once.
 
 Each received character returns one JSON object terminated by a newline:
 
@@ -47,8 +49,10 @@ Each received character returns one JSON object terminated by a newline:
 | --- | --- |
 | `1` to `4` | ADC result for AIN0 to AIN3, respectively |
 | `t` | AHT20 temperature and relative humidity |
+| `s` | AHT20 temperature in Fahrenheit, humidity, and AIN3 voltage |
 
 For example, `t` returns `{"aht20":{"temperature_c":24.50,"temperature_f":76.10,"humidity_rh":42.3}}`.
+The combined `s` command returns `{"temperature_f":76.10,"humidity_rh":42.3,"ain3_volts":1.234500, host:<MAC_ADDRESS>}`.
 
 Build and upload from this directory with:
 

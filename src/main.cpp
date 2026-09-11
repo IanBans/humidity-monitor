@@ -6,7 +6,6 @@
 
 #include "secrets.h"
 
-// XIAO ESP32-C6 <-> ADS1118 wiring
 constexpr int PIN_CS   = 18;
 constexpr int PIN_MOSI = 20;
 constexpr int PIN_MISO = 19;
@@ -23,8 +22,11 @@ SPIClass adcSpi(FSPI);
 Adafruit_AHTX0 aht;
 bool ahtAvailable = false;
 WiFiServer telnetServer(23);
-WiFiClient telnetClient;
+constexpr size_t MAX_TELNET_CLIENTS = 2;
+WiFiClient telnetClients[MAX_TELNET_CLIENTS];
 bool telnetServerStarted = false;
+bool serialReportSent = false;
+bool serialNetworkInfoSent = false;
 uint32_t lastWiFiRetryMs = 0;
 
 // ADS1118 config fields.  The device converts AINx relative to GND in
@@ -81,16 +83,16 @@ float readTemperatureC() {
   return counts * 0.03125f;
 }
 
-void sendJsonError(const char *message) {
-  telnetClient.printf("{\"error\":\"%s\"}\r\n", message);
+void sendJsonError(WiFiClient &client, const char *message) {
+  client.printf("{\"error\":\"%s\"}\r\n", message);
 }
 
-void respondToTelnetCommand(char command) {
+void respondToTelnetCommand(WiFiClient &client, char command) {
   if (command >= '1' && command <= '4') {
     const uint8_t channel = command - '1';
     const int16_t counts = readAdc(channel);
     const float volts = counts * (FULL_SCALE_VOLTS / 32768.0f);
-    telnetClient.printf(
+    client.printf(
         "{\"adc\":{\"channel\":%u,\"counts\":%d,\"volts\":%.6f}}\r\n",
         channel, counts, volts);
     return;
@@ -98,21 +100,40 @@ void respondToTelnetCommand(char command) {
 
   if (command == 't' || command == 'T') {
     if (!ahtAvailable) {
-      sendJsonError("AHT20 unavailable");
+      sendJsonError(client, "AHT20 unavailable");
       return;
     }
 
     sensors_event_t humidity;
     sensors_event_t temperature;
     aht.getEvent(&humidity, &temperature);
-    telnetClient.printf(
+    client.printf(
         "{\"aht20\":{\"temperature_c\":%.2f,\"temperature_f\":%.2f,\"humidity_rh\":%.1f}}\r\n",
         temperature.temperature, temperature.temperature * 1.8f + 32.0f,
         humidity.relative_humidity);
     return;
   }
 
-  sendJsonError("commands: 1, 2, 3, 4, t");
+  if (command == 's' || command == 'S') {
+    if (!ahtAvailable) {
+      sendJsonError(client, "AHT20 unavailable");
+      return;
+    }
+
+    sensors_event_t humidity;
+    sensors_event_t temperature;
+    aht.getEvent(&humidity, &temperature);
+
+    const int16_t adcCounts = readAdc(3);
+    const float adcVolts = adcCounts * (FULL_SCALE_VOLTS / 32768.0f);
+    client.printf(
+      "{\"temperature_f\":%.2f,\"humidity_rh\":%.1f,\"ain3_volts\":%.6f, \"host\":\"%s\"}\r\n",
+        temperature.temperature * 1.8f + 32.0f, humidity.relative_humidity,
+        adcVolts, WiFi.macAddress().c_str());
+    return;
+  }
+
+  sendJsonError(client, "commands: 1, 2, 3, 4, t, s");
 }
 
 void serviceTelnet() {
@@ -120,21 +141,36 @@ void serviceTelnet() {
     return;
   }
 
-  if (!telnetClient || !telnetClient.connected()) {
-    WiFiClient newClient = telnetServer.available();
-    if (newClient) {
-      if (telnetClient) {
-        telnetClient.stop();
-      }
-      telnetClient = newClient;
-      telnetClient.println("{\"ready\":true,\"commands\":[\"1\",\"2\",\"3\",\"4\",\"t\"]}");
+  // Release disconnected slots before accepting new sessions.
+  for (WiFiClient &client : telnetClients) {
+    if (client && !client.connected()) {
+      client.stop();
     }
   }
 
-  while (telnetClient && telnetClient.available()) {
-    const char command = static_cast<char>(telnetClient.read());
-    if (command != '\r' && command != '\n') {
-      respondToTelnetCommand(command);
+  WiFiClient newClient = telnetServer.accept();
+  if (newClient) {
+    bool accepted = false;
+    for (WiFiClient &client : telnetClients) {
+      if (!client) {
+        client = newClient;
+        client.println("{\"ready\":true,\"commands\":[\"1\",\"2\",\"3\",\"4\",\"t\",\"s\"]}");
+        accepted = true;
+        break;
+      }
+    }
+    if (!accepted) {
+      newClient.println("{\"error\":\"maximum of two Telnet sessions reached\"}");
+      newClient.stop();
+    }
+  }
+
+  for (WiFiClient &client : telnetClients) {
+    while (client && client.available()) {
+      const char command = static_cast<char>(client.read());
+      if (command != '\r' && command != '\n') {
+        respondToTelnetCommand(client, command);
+      }
     }
   }
 }
@@ -144,16 +180,26 @@ void serviceWiFi() {
     if (!telnetServerStarted) {
       telnetServer.begin();
       telnetServerStarted = true;
-      Serial.printf("Wi-Fi connected: %s\n", WiFi.localIP().toString().c_str());
-      Serial.println("Telnet JSON server listening on port 23");
     }
     return;
   }
 
+  serialNetworkInfoSent = false;
   if (millis() - lastWiFiRetryMs >= 10'000) {
     lastWiFiRetryMs = millis();
-    Serial.println("Wi-Fi reconnecting...");
     WiFi.reconnect();
+  }
+}
+
+// Reprint this one line when a USB serial monitor reconnects, but do not
+// continuously log network information.
+void serviceSerialNetworkInfo() {
+  // USB Serial/JTAG does not reliably expose terminal open/close state on all
+  // hosts, so report as soon as Wi-Fi is ready rather than gating on Serial.
+  if (!serialNetworkInfoSent && WiFi.status() == WL_CONNECTED) {
+    Serial.printf("Wi-Fi IP: %s | MAC: %s\n", WiFi.localIP().toString().c_str(),
+                  WiFi.macAddress().c_str());
+    serialNetworkInfoSent = true;
   }
 }
 
@@ -172,33 +218,33 @@ void setup() {
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
   lastWiFiRetryMs = millis();
 
-  Serial.println("ADS1118 reader ready");
-  if (ahtAvailable) {
-    Serial.println("AHT20 ready");
-  } else {
-    Serial.println("AHT20 not found; check SDA, SCL, power, and address 0x38");
-  }
 }
 
 void loop() {
   serviceWiFi();
+  serviceSerialNetworkInfo();
   serviceTelnet();
 
-  // Change 0 to 1, 2, or 3 to select the corresponding ADS1118 AIN pin.
-  const int16_t counts = readAdc(0);
-  const float volts = counts * (FULL_SCALE_VOLTS / 32768.0f);
-  const float adsTemperatureC = readTemperatureC();
+  if (!serialReportSent) {
+    // Change 0 to 1, 2, or 3 to select the corresponding ADS1118 AIN pin.
+    const int16_t counts = readAdc(0);
+    const float volts = counts * (FULL_SCALE_VOLTS / 32768.0f);
+    const float adsTemperatureC = readTemperatureC();
+    Serial.printf("AIN0: %d counts, %.4f V | ADS1118: %.2f C (%.2f F)\n",
+                  counts, volts, adsTemperatureC, adsTemperatureC * 1.8f + 32.0f);
 
-  Serial.printf("AIN0: %d counts, %.4f V | ADS1118: %.2f C (%.2f F)\n",
-                counts, volts, adsTemperatureC, adsTemperatureC * 1.8f + 32.0f);
-
-  if (ahtAvailable) {
+    if (ahtAvailable) {
     sensors_event_t humidity;
     sensors_event_t temperature;
     aht.getEvent(&humidity, &temperature);
     Serial.printf("AHT20: %.2f C (%.2f F), %.1f %%RH\n",
                   temperature.temperature, temperature.temperature * 1.8f + 32.0f,
                   humidity.relative_humidity);
+    } else {
+      Serial.println("AHT20 unavailable");
+    }
+    serialReportSent = true;
   }
+
   delay(500);
 }
